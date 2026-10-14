@@ -33,7 +33,9 @@ npm run dev                                   # netlify dev: frontend + function
 npm run build
 ```
 
-You need keys for OpenRouter (LLMs), TwitterAPI.io (X), Serper (Google search) and Oxylabs (residential proxy for Reddit). To sign people in, point `FIREBASE_PROJECT_ID` and the `VITE_FIREBASE_*` values at your own Firebase project.
+You need keys for an LLM gateway, TwitterAPI.io (X), Serper (Google search) and Oxylabs (residential proxy for Reddit).
+
+LLM gateway: the pipeline talks to any OpenAI-compatible chat-completions API. OpenRouter is the default (`OPENROUTER_API_KEY`). [Straitly](https://straitly.ai) is a built-in alternative: set `STRAITLY_API_KEY` (optionally `LLM_GATEWAY=straitly`) and the same pipeline runs through `api.straitly.ai`. Any other gateway: `LLM_GATEWAY=custom` with `LLM_BASE_URL`, `LLM_API_KEY` and `LLM_MODEL`. Model ids are the gateway's own, so each preset carries its own default model and sort voters; override with `LLM_MODEL` and `SORT_VOTERS` (see `.env.example`). `LLM_PROVIDERS` applies to OpenRouter only. Per-call cost is read from the response's `usage.cost` when the gateway sends it (OpenRouter and Straitly do).
 
 ## Limits and abuse guards
 
