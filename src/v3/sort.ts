@@ -248,7 +248,7 @@ function parseLabels(text: string, n: number, k: number, titles?: string[]): (La
  * with 88.7% of counted votes real (DeepSeek alone 84.2%). DeepSeek is primary; the voters only get a short grace
  * period after it finishes, and a missing voter just means DeepSeek's label stands.
  */
-const VOTERS = (process.env.SORT_VOTERS ?? "xiaomi/mimo-v2.6-flash,openai/gpt-6-luna-pro").split(",").map((s) => s.trim()).filter(Boolean);
+const VOTERS = env.llmVoters;
 const VOTER_GRACE_MS = Number(process.env.SORT_VOTER_GRACE_MS ?? 6_000);
 
 async function labelOnce(prompt: string, model: string, n: number, k: number, signal?: AbortSignal, noReasoning?: boolean, titles?: string[]): Promise<(Label | undefined)[]> {

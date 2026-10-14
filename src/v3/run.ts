@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { env } from "../lib/env.ts";
 import { logger } from "../lib/log.ts";
 import { isoFromEpoch } from "../lib/types.ts";
 import { meterStore, newMeter, type Meter } from "../lib/meter.ts";
@@ -42,9 +43,9 @@ const MIN_OPTION_COUNT = 2;
 const MIN_OPTION_SHARE = 0.03;
 const MIN_OPTION_SHARE_LONG_TAIL = 0.012;
 /** Shared by every search on this function instance. */
-const llmGate = new Semaphore(Number(process.env.SORT_CONCURRENCY ?? 160));
+const llmGate = new Semaphore(env.llmConcurrency);
 /** KAN-408 pick tally ("best X" only): its own gate so it never delays the sorter or the first poll. */
-const picksGate = new Semaphore(Number(process.env.PICKS_CONCURRENCY ?? 60));
+const picksGate = new Semaphore(Number(process.env.PICKS_CONCURRENCY ?? Math.min(60, env.llmConcurrency)));
 const PICKS_WAIT_MS = Number(process.env.PICKS_WAIT_MS ?? 5_000);
 /** Most posts each source may send to the sorter; past this, extra posts cost money but barely move the poll. */
 const POOL_CAP: Record<V3Source, number> = { reddit: Number(process.env.POOL_CAP_REDDIT ?? 3500), x: Number(process.env.POOL_CAP_X ?? 4500) };

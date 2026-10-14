@@ -3,7 +3,6 @@ import { logger } from "./lib/log.ts";
 import { meter } from "./lib/meter.ts";
 
 const log = logger("llm");
-const OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
 
 export interface LlmOptions {
   model?: string;
@@ -26,20 +25,23 @@ function body(prompt: string, opts: LlmOptions, extra: Record<string, unknown>) 
     max_tokens: opts.maxTokens ?? 8000,
     // Jev otherwise routes long prompts to reasoning models that print their thinking instead of the answer.
     ...((opts.noReasoning ?? (model.startsWith("deepseek/") || model.includes("jev-router"))) ? { reasoning: { enabled: false } } : {}),
-    ...(providers.length && model.startsWith("deepseek/")
-      ? { provider: { order: providers, allow_fallbacks: true, require_parameters: true } }
+    // OpenRouter-only fields: provider routing and per-call cost in `usage`.
+    ...(env.llmGateway.name === "openrouter"
+      ? {
+          ...(providers.length && model.startsWith("deepseek/") ? { provider: { order: providers, allow_fallbacks: true, require_parameters: true } } : {}),
+          usage: { include: true },
+        }
       : {}),
-    usage: { include: true },
     ...extra,
   };
 }
 
 function headers() {
+  const gw = env.llmGateway;
   return {
-    Authorization: `Bearer ${env.openRouterKey}`,
+    Authorization: `Bearer ${gw.key}`,
     "Content-Type": "application/json",
-    "HTTP-Referer": "https://consensus.local",
-    "X-Title": "Consensus",
+    ...(gw.name === "openrouter" ? { "HTTP-Referer": "https://consensus.local", "X-Title": "Consensus" } : {}),
   };
 }
 
@@ -51,6 +53,22 @@ function stripFences(text: string): string {
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+let warnedNoCost = false;
+
+/**
+ * USD for one call: the gateway's own usage.cost when present, otherwise tokens x the gateway's fallback price, so the
+ * daily spend cap never counts a call as free. Tokens come from usage.total_tokens, or ~4 characters per token if absent.
+ */
+export function callCost(usage: { cost?: number; total_tokens?: number } | undefined, prompt: string, output: string): number {
+  if (typeof usage?.cost === "number" && Number.isFinite(usage.cost)) return usage.cost;
+  const gw = env.llmGateway;
+  const tokens = usage?.total_tokens ?? Math.ceil((prompt.length + output.length) / 4);
+  if (!warnedNoCost) {
+    warnedNoCost = true;
+    log.warn(`${gw.name} returned no usage.cost; metering at ${gw.usdPer1kTokens} USD per 1k tokens (LLM_USD_PER_1K_TOKENS)`);
+  }
+  return (tokens / 1000) * gw.usdPer1kTokens;
+}
 
 export async function completeText(prompt: string, opts: LlmOptions & { json?: boolean } = {}, retries = 2): Promise<string> {
   let lastError: unknown;
@@ -59,31 +77,41 @@ export async function completeText(prompt: string, opts: LlmOptions & { json?: b
   let netExtra = 2;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      const res = await fetch(OPENROUTER_URL, {
+      const res = await fetch(env.llmGateway.url, {
         method: "POST",
         headers: headers(),
         body: JSON.stringify(body(prompt, opts, opts.json ? { response_format: { type: "json_object" } } : {})),
         signal: AbortSignal.any([AbortSignal.timeout(opts.timeoutMs ?? 45_000), ...(opts.signal ? [opts.signal] : [])]),
       });
-      const data = (await res.json()) as { choices?: { message?: { content?: string } }[]; error?: unknown; usage?: { cost?: number } };
-      if (!res.ok || !data.choices) throw new Error(`OpenRouter ${res.status}: ${JSON.stringify(data.error ?? data)}`);
+      const data = (await res.json()) as { choices?: { message?: { content?: string } }[]; error?: unknown; usage?: { cost?: number; total_tokens?: number } };
+      if (!res.ok || !data.choices) {
+        const err = new Error(`${env.llmGateway.name} ${res.status}: ${JSON.stringify(data.error ?? data)}`) as Error & { status?: number; retryAfterMs?: number };
+        err.status = res.status;
+        const ra = Number(res.headers.get("retry-after"));
+        if (res.status === 429 && ra > 0) err.retryAfterMs = ra * 1000;
+        throw err;
+      }
+      const content = data.choices[0]?.message?.content ?? "";
       const m = meter();
       if (m) {
         m.llmCalls++;
-        m.llmUsd += Number(data.usage?.cost ?? 0);
+        m.llmUsd += callCost(data.usage, prompt, content);
       }
-      return data.choices[0]?.message?.content ?? "";
+      return content;
     } catch (e) {
       lastError = e;
       if (opts.signal?.aborted) break;
       const net = e instanceof TypeError;
+      // Gateway concurrency/rate limits (429) clear in seconds; back off longer and allow the extra attempts network errors get.
+      const limited = (e as { status?: number })?.status === 429;
       const cause = (e as { cause?: { code?: string } })?.cause?.code;
       log.warn(`attempt ${attempt + 1} failed`, { error: String(e), ...(cause ? { cause } : {}) });
-      if (net && attempt === retries && netExtra > 0) {
+      if ((net || limited) && attempt === retries && netExtra > 0) {
         netExtra--;
         retries++;
       }
-      await sleep((net ? 600 * 2 ** attempt : 300 * (attempt + 1)) + Math.random() * 400);
+      const retryAfter = (e as { retryAfterMs?: number })?.retryAfterMs;
+      await sleep((retryAfter ?? (limited ? 1_500 * 2 ** attempt : net ? 600 * 2 ** attempt : 300 * (attempt + 1))) + Math.random() * 400);
     }
   }
   const m = meter();
@@ -110,13 +138,13 @@ export async function completeJson<T>(prompt: string, schema?: object, opts: Llm
 }
 
 export async function* streamText(prompt: string, opts: LlmOptions = {}): AsyncGenerator<string> {
-  const res = await fetch(OPENROUTER_URL, {
+  const res = await fetch(env.llmGateway.url, {
     method: "POST",
     headers: headers(),
     body: JSON.stringify(body(prompt, opts, { stream: true })),
     signal: AbortSignal.any([AbortSignal.timeout(opts.timeoutMs ?? 50_000), ...(opts.signal ? [opts.signal] : [])]),
   });
-  if (!res.ok || !res.body) throw new Error(`OpenRouter ${res.status}: ${(await res.text()).slice(0, 300)}`);
+  if (!res.ok || !res.body) throw new Error(`${env.llmGateway.name} ${res.status}: ${(await res.text()).slice(0, 300)}`);
 
   const decoder = new TextDecoder();
   let buffer = "";
