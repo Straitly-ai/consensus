@@ -5,6 +5,7 @@ export interface Meter {
   llmUsd: number;
   llmCalls: number;
   llmFailed: number;
+  llmFatal?: boolean;
   xUsd: number;
   xCalls: number;
   xRetries: number;

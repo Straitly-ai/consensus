@@ -257,6 +257,7 @@ async function pipeline(req: SearchRequest, m: Meter, emit: (e: V3Event) => void
         base = w;
       } else base = await writeOptionsFromQuestion(req.query, signal);
     } catch (e) {
+      if (m.llmFatal) throw new Error("The AI service is unavailable. Please try again later.");
       // Every question gets a poll: an "off-topic" sample (often an early, narrow or ambiguous one) is not a reason to stop.
       // Options are written from the question instead and the sorter still drops posts that are not about it.
       log.warn(e instanceof OffTopicError ? "sample judged off-topic; writing options from the question" : "options failed, retrying from the question", { error: String(e), pool: pool.length });
@@ -264,6 +265,7 @@ async function pipeline(req: SearchRequest, m: Meter, emit: (e: V3Event) => void
       base = await writeOptionsFromQuestion(req.query, signal).catch(() => []);
       if (!base.length) base = await writeOptionsFromQuestion(req.query, signal).catch(() => []);
     }
+    if (m.llmFatal) throw new Error("The AI service is unavailable. Please try again later.");
     if (!base.length) base = genericOptions(req.query);
     const options: OptionState[] = base.map((o, i) => ({ ...o, id: `o${i}` }));
     const other: OptionState = { id: OTHER_ID, title: "Other", description: "Opinions that fit none of the options above." };
@@ -657,6 +659,9 @@ async function pipeline(req: SearchRequest, m: Meter, emit: (e: V3Event) => void
     mark("reasons_done");
 
     stage = "done";
+    if (m.llmFatal || (sortedCount === 0 && m.llmFailed > 0)) {
+      throw new Error("The AI service could not classify the posts. Please try again later.");
+    }
     const cost = { llm_usd: round(m.llmUsd), x_usd: round(m.xUsd), serper_usd: round(m.serperCredits * 0.001), total_usd: round(m.llmUsd + m.xUsd + m.serperCredits * 0.001) };
     // "thin" lets the UI show a "not much data for this question" note instead of a misleading poll.
     const status = finalPoll.total_opinions === 0 ? "empty" : finalPoll.total_opinions < 20 ? "thin" : "ok";

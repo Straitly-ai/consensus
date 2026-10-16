@@ -1,0 +1,23 @@
+name: Deploy useconsensus.io
+on:
+  push:
+    branches: [main]
+concurrency:
+  group: useconsensus-production
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: node --import tsx --test scripts/llm.test.ts
+      - run: npx --yes netlify-cli@27.0.1 deploy --prod --context production --site 8765d8ab-45da-46d0-b83b-bebc4e4af014 --message "${{ github.sha }}"
+        env:
+          NETLIFY_AUTH_TOKEN: ${{ secrets.NETLIFY_AUTH_TOKEN }}

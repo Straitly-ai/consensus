@@ -74,6 +74,24 @@ A search can take up to a minute; if your client times out tool calls sooner, ra
 
 Each visitor can run one search at a time. Per-IP hourly rate limits, a daily spend cap (`DAILY_SPEND_CAP_USD`) and a global X request budget (`X_GLOBAL_RPS`) keep load and cost bounded. These are tunable through the environment variables in `.env.example` and the constants at the top of each `src/v3` file.
 
+## Production Deployment
+
+The live site is Netlify `useconsensus` (`8765d8ab-45da-46d0-b83b-bebc4e4af014`) at https://useconsensus.io.
+The source of truth is `Straitly-ai/consensus`, branch `main`. The historical Netlify repository link and
+`mutchtaba/consensus` deployment workflow are not the production v3 release path.
+Never deploy to `consensus-api-mutchtaba` to update useconsensus.io.
+
+After review, tests, and explicit production approval, push the intended commit to `main`. The GitHub Actions
+workflow deploys that exact checkout to the explicit site ID. Do not manually deploy production.
+First validate a draft deployment with the same explicit site ID. Verify the published deploy ID and
+a fresh, complete search with classified Reddit and X opinions before reporting success.
+Keep the previous published deploy ID for rollback with Netlify's restore-deploy operation.
+
+Production uses Straitly with `LLM_MODEL=gpt-6-luna`, `SORT_VOTERS=` (single-model classification),
+`SORT_CONCURRENCY=40`, `SORT_BATCH=25`, `POOL_CAP_REDDIT=1800`, `POOL_CAP_X=1800`,
+`SORT_DEADLINE_MS=40000`, and `FINISH_BY_MS=52000`. These are bounded settings, not an unlimited-load guarantee.
+Run regression tests with `node --import tsx --test scripts/llm.test.ts`.
+
 ## Security
 
 No keys live in this repo. Production functions read them from the host's environment variables. Report vulnerabilities privately to the maintainers rather than in a public issue.

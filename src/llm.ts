@@ -1,6 +1,7 @@
 import { env } from "./lib/env.ts";
 import { logger } from "./lib/log.ts";
 import { meter } from "./lib/meter.ts";
+import { setTimeout as delay } from "node:timers/promises";
 
 const log = logger("llm");
 
@@ -24,7 +25,9 @@ function body(prompt: string, opts: LlmOptions, extra: Record<string, unknown>) 
     temperature: opts.temperature ?? 0,
     max_tokens: opts.maxTokens ?? 8000,
     // Jev otherwise routes long prompts to reasoning models that print their thinking instead of the answer.
-    ...((opts.noReasoning ?? (model.startsWith("deepseek/") || model.includes("jev-router"))) ? { reasoning: { enabled: false } } : {}),
+    ...((opts.noReasoning ?? (env.llmGateway.name === "straitly" || model.startsWith("deepseek/") || model.includes("jev-router")))
+      ? env.llmGateway.name === "straitly" ? { reasoning_effort: "none" } : { reasoning: { enabled: false } }
+      : {}),
     // OpenRouter-only fields: provider routing and per-call cost in `usage`.
     ...(env.llmGateway.name === "openrouter"
       ? {
@@ -52,7 +55,6 @@ function stripFences(text: string): string {
   return t.trim();
 }
 
-const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 let warnedNoCost = false;
 
 /**
@@ -76,6 +78,10 @@ export async function completeText(prompt: string, opts: LlmOptions & { json?: b
   // eval batch); they get two extra attempts with jittered, growing backoff so the retries do not land in the same burst.
   let netExtra = 2;
   for (let attempt = 0; attempt <= retries; attempt++) {
+    if (opts.signal?.aborted) {
+      lastError = opts.signal.reason;
+      break;
+    }
     try {
       const res = await fetch(env.llmGateway.url, {
         method: "POST",
@@ -101,6 +107,12 @@ export async function completeText(prompt: string, opts: LlmOptions & { json?: b
     } catch (e) {
       lastError = e;
       if (opts.signal?.aborted) break;
+      // Credentials, billing and invalid model configuration cannot recover through retries.
+      if ([400, 401, 402, 403, 404].includes((e as { status?: number })?.status ?? 0)) {
+        const m = meter();
+        if (m) m.llmFatal = true;
+        break;
+      }
       const net = e instanceof TypeError;
       // Gateway concurrency/rate limits (429) clear in seconds; back off longer and allow the extra attempts network errors get.
       const limited = (e as { status?: number })?.status === 429;
@@ -111,7 +123,13 @@ export async function completeText(prompt: string, opts: LlmOptions & { json?: b
         retries++;
       }
       const retryAfter = (e as { retryAfterMs?: number })?.retryAfterMs;
-      await sleep((retryAfter ?? (limited ? 1_500 * 2 ** attempt : net ? 600 * 2 ** attempt : 300 * (attempt + 1))) + Math.random() * 400);
+      if (attempt < retries) {
+        try {
+          await delay(Math.min(10_000, retryAfter ?? (limited ? 1_500 * 2 ** attempt : net ? 600 * 2 ** attempt : 300 * (attempt + 1))) + Math.random() * 400, undefined, { signal: opts.signal });
+        } catch {
+          break;
+        }
+      }
     }
   }
   const m = meter();

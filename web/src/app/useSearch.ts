@@ -49,7 +49,7 @@ function reducer(s: SearchState, a: Action): SearchState {
       return { ...s, phase: a.error?.code === 'signup_required' ? 'gated' : 'error', error: a.error };
     case 'ended':
       if (s.phase === 'done' || s.phase === 'error') return s;
-      return s.poll ? { ...s, phase: 'done' } : { ...s, phase: 'error', error: { status: 0, code: 'ended', message: 'The search stopped before it finished. Please try again.' } };
+      return { ...s, phase: 'error', error: { status: 0, code: 'ended', message: 'The search stopped before it finished. Please try again.' } };
     case 'events': {
       const n = { ...s };
       let posts = s.posts;
