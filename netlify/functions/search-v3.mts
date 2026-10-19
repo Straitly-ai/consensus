@@ -2,7 +2,8 @@ import type { Config, Context } from "@netlify/functions";
 import { env } from "../../src/lib/env.ts";
 import { runV3, searchId } from "../../src/v3/run.ts";
 import { anonId, clientIp, sessionUser } from "../../src/v3/auth.ts";
-import { acquireInflight, addHistory, addSpend, allowRequest, anonFreeSearch, anonIpCount, countUserSearch, readCache, readSaved, claimFreeSearch, releaseInflight, spentToday, writeCache } from "../../src/v3/store.ts";
+import { acquireInflight, addHistory, addSpend, allowRequest, countUserSearch, readCache, readSaved, releaseInflight, spentToday, writeCache } from "../../src/v3/store.ts";
+import { grantFor, takeCredit } from "../../src/v3/credits.ts";
 import type { V3Event, V3Source } from "../../src/v3/types.ts";
 import { isDevRuntime } from "../../src/lib/runtime.ts";
 
@@ -17,8 +18,7 @@ const isDate = (s: string) => {
 };
 /** Same-origin app; no cross-origin access (cookies carry the session). */
 const CORS: Record<string, string> = {};
-/** Anonymous free searches allowed per IP per day (covers shared networks, stops cookie-clearing loops). */
-const ANON_PER_IP_PER_DAY = Number(process.env.ANON_PER_IP_PER_DAY ?? 3);
+const NO_CREDITS = "New searches are paused right now. Saved and shared polls still open.";
 function streamOf(run: (send: (e: V3Event) => void) => Promise<void>, setCookie: string | null = null, showDetail = false): Response {
   const stream = new ReadableStream<Uint8Array>({
     async start(controller) {
@@ -95,27 +95,18 @@ export default async (req: Request, context: Context) => {
   const request = { query, since, until, sources: [...new Set(sources)] };
   const id = searchId(request);
 
-  // Access: signed-in Straitly users search freely (within limits); anonymous visitors get one search.
+  // Access: cached replays are free for everyone; a new (paid) run needs a credit, and only allowlisted accounts have any.
   const [user, anon] = [await sessionUser(req), anonId(req)];
   const ip = clientIp(req, context.ip);
-  if (!user) {
-    const used = await anonFreeSearch(anon.id);
-    if (used && used !== id) return deny(401, "signup_required", "Sign up free to keep searching.", anon.setCookie);
-    if (!used) {
-      if ((await anonIpCount(ip)) >= ANON_PER_IP_PER_DAY) return deny(401, "signup_required", "Sign up free to keep searching.", anon.setCookie);
-      // Atomic: of several parallel first searches, only one wins the free slot.
-      const claimed = await claimFreeSearch(anon.id, ip, id, ANON_PER_IP_PER_DAY);
-      if (claimed !== id) return deny(401, "signup_required", "Sign up free to keep searching.", anon.setCookie);
-    }
-  }
 
   if (user) void addHistory(user.uid, { id, query, since: since ?? null, until: until ?? null, sources: request.sources }).catch(() => {});
 
-  // Only signed-in users may force a fresh (paid) run.
-  if (!(user && p.get("fresh") === "1")) {
+  // Only accounts with credits may force a fresh (paid) run.
+  if (!(user && grantFor(user) > 0 && p.get("fresh") === "1")) {
     const cached = await readCache(id, env.cacheTtlHours);
     if (cached) return replay(cached.events, cached.saved_at, anon.setCookie);
   }
+  if (!user || grantFor(user) <= 0) return deny(402, "no_credits", NO_CREDITS, anon.setCookie);
 
   // Unverified email/password accounts are cheap to mint, so they get a tighter hourly limit.
   const perHour = user && !user.email_verified ? Math.min(10, env.rateLimitPerHour) : env.rateLimitPerHour;
@@ -134,7 +125,8 @@ export default async (req: Request, context: Context) => {
   const [rate, spent] = await Promise.all([allowRequest(user ? `u:${user.uid}` : ip, perHour), spentToday()]);
   if (!rate.ok) return release(), deny(429, "rate_limited", "Too many searches. Try again in an hour.", anon.setCookie);
   if (spent >= env.dailySpendCapUsd) return release(), deny(503, "over_capacity", "We've hit today's search capacity. Please try again tomorrow.", anon.setCookie);
-  if (user) void countUserSearch(user.uid).catch(() => {});
+  if ((await takeCredit(user)) === null) return release(), deny(402, "no_credits", NO_CREDITS, anon.setCookie);
+  void countUserSearch(user.uid).catch(() => {});
   req.signal?.addEventListener?.("abort", release, { once: true });
 
   return streamOf(async (send) => {

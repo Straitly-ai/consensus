@@ -451,9 +451,9 @@ export function Results({ state, query, retry, onWiden, tools }: { state: Search
     return (
       <div className="state-panel">
         <AlertCircle size={28} />
-        <h2>{state.error?.code === 'rate_limited' ? 'Slow down a little' : state.error?.code === 'over_capacity' ? 'We’re busy right now' : state.error?.code === 'not_found' ? 'This link has expired' : 'That search didn’t finish'}</h2>
+        <h2>{state.error?.code === 'rate_limited' ? 'Slow down a little' : state.error?.code === 'over_capacity' ? 'We’re busy right now' : state.error?.code === 'no_credits' ? 'New searches are paused' : state.error?.code === 'not_found' ? 'This link has expired' : 'That search didn’t finish'}</h2>
         <p>{state.error?.message}</p>
-        {state.error?.code !== 'not_found' && (
+        {state.error?.code !== 'not_found' && state.error?.code !== 'no_credits' && (
           <button className="btn primary" onClick={retry}>
             <RotateCw size={15} /> Try again
           </button>
